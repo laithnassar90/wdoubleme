@@ -1,0 +1,157 @@
+/**
+ * Sentry Error Monitoring Integration
+ * Version: 1.0.0
+ *
+ * Comprehensive error tracking and monitoring for production
+ */
+
+import * as Sentry from '@sentry/react';
+
+let sentryInitialized = false;
+
+export function initSentry() {
+  if (sentryInitialized) {
+    return;
+  }
+
+  const dsn = import.meta.env.VITE_SENTRY_DSN;
+  const environment = import.meta.env.MODE;
+
+  if (!dsn) {
+    if (import.meta.env.DEV) {
+      console.warn('[Sentry] DSN not configured - error monitoring disabled');
+    }
+    return;
+  }
+
+  Sentry.init({
+    dsn,
+    environment,
+    integrations: [],
+    tracesSampleRate: environment === 'production' ? 0.1 : 1.0,
+    replaysSessionSampleRate: environment === 'production' ? 0.1 : 1.0,
+    replaysOnErrorSampleRate: 1.0,
+    release: `wasel@${import.meta.env.VITE_APP_VERSION || '1.0.0'}`,
+    ignoreErrors: [
+      'ResizeObserver loop limit exceeded',
+      'Non-Error promise rejection captured',
+      'Network request failed',
+      'Failed to fetch',
+    ],
+    beforeSend(event) {
+      const raw = localStorage.getItem('wasel_local_user_v2');
+
+      if (raw) {
+        try {
+          const userData = JSON.parse(raw);
+          event.user = { id: userData.id };
+        } catch {
+          // Ignore malformed local user payloads.
+        }
+      }
+
+      event.tags = {
+        ...event.tags,
+        language: localStorage.getItem('wasel_language') || 'ar',
+        theme: localStorage.getItem('wasel_theme') || 'dark',
+      };
+
+      return event;
+    },
+  });
+
+  sentryInitialized = true;
+
+  if (import.meta.env.DEV) {
+    console.log('[Sentry] Initialized');
+  }
+}
+
+export const logger = {
+  error: (message: string, error?: Error | unknown, context?: Record<string, any>) => {
+    if (import.meta.env.DEV) {
+      console.error('[Wasel]', message, error, context);
+    }
+
+    Sentry.captureException(error || new Error(message), {
+      level: 'error',
+      tags: { type: 'application_error' },
+      extra: context,
+    });
+  },
+
+  warning: (message: string, context?: Record<string, any>) => {
+    if (import.meta.env.DEV) {
+      console.warn('[Wasel]', message, context);
+    }
+
+    Sentry.captureMessage(message, {
+      level: 'warning',
+      tags: { type: 'application_warning' },
+      extra: context,
+    });
+  },
+
+  info: (message: string, context?: Record<string, any>) => {
+    if (import.meta.env.DEV) {
+      console.info('[Wasel]', message);
+    }
+
+    if (context?.important) {
+      Sentry.captureMessage(message, {
+        level: 'info',
+        tags: { type: 'application_info' },
+        extra: context,
+      });
+    }
+  },
+
+  startTransaction: (name: string, op: string) => {
+    logger.addBreadcrumb(`Transaction: ${name}`, 'performance', { op });
+    return { finish: () => undefined };
+  },
+
+  addBreadcrumb: (message: string, category: string, data?: Record<string, any>) => {
+    Sentry.addBreadcrumb({ message, category, level: 'info', data });
+  },
+};
+
+export function trackAPICall(endpoint: string, method: string, duration: number, status: number) {
+  logger.addBreadcrumb(`API ${method} ${endpoint}`, 'api', {
+    endpoint,
+    method,
+    duration,
+    status,
+  });
+
+  if (duration > 3000) {
+    logger.warning(`Slow API call: ${method} ${endpoint}`, {
+      duration,
+      status,
+      endpoint,
+    });
+  }
+}
+
+export function trackUserAction(action: string, data?: Record<string, any>) {
+  logger.addBreadcrumb(action, 'user_action', data);
+}
+
+export function trackNavigation(from: string, to: string) {
+  logger.addBreadcrumb(`Navigation: ${from} -> ${to}`, 'navigation', {
+    from,
+    to,
+  });
+}
+
+export const ErrorBoundary = Sentry.ErrorBoundary;
+
+export function usePerformanceMonitoring(componentName: string) {
+  const transaction = logger.startTransaction(componentName, 'component.render');
+
+  return () => {
+    transaction.finish();
+  };
+}
+
+export default Sentry;
